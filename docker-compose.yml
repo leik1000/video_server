@@ -11,6 +11,7 @@ services:
       VIDEO_SERVER_STORAGE_DIR: "/data/videos"
       VIDEO_SERVER_METADATA_FILE: "/data/video_index.json"
       VIDEO_SERVER_MAX_UPLOAD_MB: "1024"
-      VIDEO_SERVER_DEFAULT_TTL_DAYS: "30"
+      VIDEO_SERVER_MAX_STORAGE_GB: "100"
+      VIDEO_SERVER_PRUNE_STORAGE_GB: "1"
     volumes:
       - ./data:/data

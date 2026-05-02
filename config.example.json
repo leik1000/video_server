@@ -4,7 +4,8 @@
   "storage_dir": "./data/videos",
   "metadata_file": "./data/video_index.json",
   "max_upload_mb": 1024,
-  "default_ttl_days": 30,
+  "max_storage_gb": 100,
+  "prune_storage_gb": 1,
   "cleanup_interval_seconds": 3600,
   "allowed_extensions": ["mp4", "webm", "mov"],
   "allowed_content_types": [

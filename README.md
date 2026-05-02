@@ -7,7 +7,7 @@
 - `POST /api/videos/upload` 上传视频文件
 - `GET /api/videos/{id}` 查询视频元数据
 - `DELETE /api/videos/{id}` 删除视频和元数据
-- `POST /api/videos/cleanup` 清理过期视频
+- `POST /api/videos/cleanup` 按容量上限清理最旧视频
 - `GET /api/health` 健康检查
 
 ## 本地启动
@@ -36,8 +36,7 @@ curl -X POST "https://video.example.com/api/videos/upload" \
   -H "Authorization: Bearer replace-with-a-long-random-secret" \
   -F "file=@task_xxx.mp4" \
   -F "task_id=task_xxx" \
-  -F "source=leo2api-node-1" \
-  -F "ttl_days=30"
+  -F "source=leo2api-node-1"
 ```
 
 返回：
@@ -50,10 +49,35 @@ curl -X POST "https://video.example.com/api/videos/upload" \
   "content_type": "video/mp4",
   "source": "leo2api-node-1",
   "url": "https://video.example.com/videos/task_xxx.mp4",
-  "created_at": 1710000000,
-  "expires_at": 1712592000
+  "created_at": 1710000000
 }
 ```
+
+## 存储与清理
+
+视频默认保存到：
+
+```text
+./data/videos
+```
+
+元数据默认保存到：
+
+```text
+./data/video_index.json
+```
+
+服务按存储容量清理，不按天数过期。默认配置：
+
+```json
+{
+  "max_storage_gb": 100,
+  "prune_storage_gb": 1,
+  "cleanup_interval_seconds": 3600
+}
+```
+
+清理逻辑：每小时检查一次 `storage_dir` 的实际文件总大小。如果超过 `max_storage_gb`，按创建时间最旧的视频优先删除，直到总大小低于上限并且本轮至少释放 `prune_storage_gb`。`POST /api/videos/cleanup` 可手动触发同样的清理逻辑。
 
 ## Nginx 下载配置
 

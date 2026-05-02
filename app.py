@@ -21,7 +21,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "storage_dir": str(BASE_DIR / "data" / "videos"),
     "metadata_file": str(BASE_DIR / "data" / "video_index.json"),
     "max_upload_mb": 1024,
-    "default_ttl_days": 30,
+    "max_storage_gb": 100,
+    "prune_storage_gb": 1,
     "cleanup_interval_seconds": 3600,
     "allowed_extensions": ["mp4", "webm", "mov"],
     "allowed_content_types": [
@@ -49,7 +50,8 @@ def _load_config() -> dict[str, Any]:
         "VIDEO_SERVER_STORAGE_DIR": "storage_dir",
         "VIDEO_SERVER_METADATA_FILE": "metadata_file",
         "VIDEO_SERVER_MAX_UPLOAD_MB": "max_upload_mb",
-        "VIDEO_SERVER_DEFAULT_TTL_DAYS": "default_ttl_days",
+        "VIDEO_SERVER_MAX_STORAGE_GB": "max_storage_gb",
+        "VIDEO_SERVER_PRUNE_STORAGE_GB": "prune_storage_gb",
         "VIDEO_SERVER_CLEANUP_INTERVAL_SECONDS": "cleanup_interval_seconds",
     }
     for env_key, config_key in env_map.items():
@@ -59,7 +61,8 @@ def _load_config() -> dict[str, Any]:
 
     for int_key in [
         "max_upload_mb",
-        "default_ttl_days",
+        "max_storage_gb",
+        "prune_storage_gb",
         "cleanup_interval_seconds",
     ]:
         try:
@@ -91,6 +94,8 @@ CONFIG = _load_config()
 STORAGE_DIR = _resolve_path(str(CONFIG["storage_dir"]))
 METADATA_FILE = _resolve_path(str(CONFIG["metadata_file"]))
 MAX_UPLOAD_BYTES = max(1, int(CONFIG["max_upload_mb"])) * 1024 * 1024
+MAX_STORAGE_BYTES = max(1, int(CONFIG["max_storage_gb"])) * 1024 * 1024 * 1024
+PRUNE_STORAGE_BYTES = max(1, int(CONFIG["prune_storage_gb"])) * 1024 * 1024 * 1024
 
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 METADATA_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -210,32 +215,84 @@ async def _write_upload(file: UploadFile, target: Path) -> int:
             pass
 
 
-def _cleanup_expired_once() -> dict[str, int]:
-    now = _now()
+def _cleanup_storage_once() -> dict[str, int]:
     removed = 0
+    removed_bytes = 0
     with metadata_lock:
         index = _read_index_locked()
-        for video_id, record in list(index.items()):
-            expires_at = int(record.get("expires_at") or 0)
-            filename = str(record.get("filename") or "")
-            if expires_at <= 0 or expires_at > now:
+        filename_to_id = {
+            Path(str(record.get("filename") or "")).name: str(video_id)
+            for video_id, record in index.items()
+            if str(record.get("filename") or "").strip()
+        }
+        files: list[dict[str, Any]] = []
+        total_bytes = 0
+        for path in STORAGE_DIR.iterdir():
+            if not path.is_file():
                 continue
-            if filename:
-                try:
-                    (STORAGE_DIR / Path(filename).name).unlink(missing_ok=True)
-                except Exception:
-                    pass
-            index.pop(video_id, None)
+            try:
+                stat = path.stat()
+            except Exception:
+                continue
+            filename = path.name
+            video_id = filename_to_id.get(filename)
+            record = index.get(video_id, {}) if video_id else {}
+            size = max(0, int(stat.st_size))
+            total_bytes += size
+            try:
+                sort_ts = int(record.get("created_at") or 0) if record else 0
+            except Exception:
+                sort_ts = 0
+            files.append(
+                {
+                    "path": path,
+                    "filename": filename,
+                    "video_id": video_id,
+                    "size": size,
+                    "sort_ts": sort_ts or float(stat.st_mtime),
+                }
+            )
+
+        if total_bytes <= MAX_STORAGE_BYTES or not files:
+            return {
+                "removed": 0,
+                "removed_bytes": 0,
+                "total_bytes": total_bytes,
+                "max_storage_bytes": MAX_STORAGE_BYTES,
+            }
+
+        current_bytes = total_bytes
+        files.sort(key=lambda item: float(item.get("sort_ts") or 0))
+        for item in files:
+            if current_bytes <= MAX_STORAGE_BYTES and removed_bytes >= PRUNE_STORAGE_BYTES:
+                break
+            path = item["path"]
+            size = int(item.get("size") or 0)
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                continue
+            video_id = item.get("video_id")
+            if video_id:
+                index.pop(str(video_id), None)
+            current_bytes = max(0, current_bytes - size)
+            removed_bytes += size
             removed += 1
+
         if removed:
             _write_index_locked(index)
-    return {"removed": removed}
+    return {
+        "removed": removed,
+        "removed_bytes": removed_bytes,
+        "total_bytes": max(0, total_bytes - removed_bytes),
+        "max_storage_bytes": MAX_STORAGE_BYTES,
+    }
 
 
 def _cleanup_loop() -> None:
     interval = max(60, int(CONFIG.get("cleanup_interval_seconds") or 3600))
     while not cleanup_stop.wait(interval):
-        _cleanup_expired_once()
+        _cleanup_storage_once()
 
 
 @app.on_event("startup")
@@ -255,6 +312,8 @@ def health() -> dict[str, Any]:
         "storage_dir": str(STORAGE_DIR),
         "public_base_url": str(CONFIG["public_base_url"]).rstrip("/"),
         "max_upload_mb": int(CONFIG["max_upload_mb"]),
+        "max_storage_gb": int(CONFIG["max_storage_gb"]),
+        "prune_storage_gb": int(CONFIG["prune_storage_gb"]),
     }
 
 
@@ -263,7 +322,6 @@ async def upload_video(
     file: UploadFile = File(...),
     task_id: str | None = Form(default=None),
     source: str | None = Form(default=None),
-    ttl_days: int | None = Form(default=None),
     _auth: None = Depends(require_upload_auth),
 ) -> JSONResponse:
     content_type = str(file.content_type or "").lower().strip()
@@ -277,8 +335,6 @@ async def upload_video(
 
     size = await _write_upload(file, target)
     created_at = _now()
-    ttl = int(ttl_days or CONFIG.get("default_ttl_days") or 0)
-    expires_at = created_at + ttl * 86400 if ttl > 0 else 0
     record = {
         "id": video_id,
         "filename": filename,
@@ -287,7 +343,6 @@ async def upload_video(
         "source": str(source or "").strip() or None,
         "url": _public_url(filename),
         "created_at": created_at,
-        "expires_at": expires_at,
     }
     _save_record(record)
     return JSONResponse(record)
@@ -314,4 +369,4 @@ def delete_video(video_id: str, _auth: None = Depends(require_upload_auth)) -> d
 
 @app.post("/api/videos/cleanup")
 def cleanup(_auth: None = Depends(require_upload_auth)) -> dict[str, int]:
-    return _cleanup_expired_once()
+    return _cleanup_storage_once()
