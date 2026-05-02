@@ -1,0 +1,16 @@
+{
+  "api_token": "replace-with-a-long-random-secret",
+  "public_base_url": "https://video.example.com/videos",
+  "storage_dir": "./data/videos",
+  "metadata_file": "./data/video_index.json",
+  "max_upload_mb": 1024,
+  "default_ttl_days": 30,
+  "cleanup_interval_seconds": 3600,
+  "allowed_extensions": ["mp4", "webm", "mov"],
+  "allowed_content_types": [
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
+    "application/octet-stream"
+  ]
+}
