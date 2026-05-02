@@ -90,14 +90,3 @@ server {
     }
 }
 ```
-
-## leo2api 对接方式
-
-视频生成服务器完成本地下载后，请向：
-
-```text
-POST https://video.example.com/api/videos/upload
-Authorization: Bearer <api_token>
-```
-
-上传 `data/generated/{task_id}.mp4`，然后使用响应里的 `url` 作为最终 `video_url` 返回给用户。
